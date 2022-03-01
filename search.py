@@ -1,16 +1,31 @@
 import os
 import argparse
 import re
-import threading
+from multiprocessing.pool import ThreadPool
 
-class consoleColors:
+class ConsoleColors:
     RED = "\033[91m"
     GREEN = "\033[92m"
     ORANGE = "\033[93m"
     DEFAULT = "\033[0m"
 
-# api and token patterns are inspired by https://github.com/trufflesecurity/truffleHog
+class DetectionType:
+    FILENAME = "FileName"
+    FILECONTENT = "FileContent"
+    DIRECTORY = "DirectoryName"
 
+class SearchResult:
+    def __init__(self, detectionType, name, context, pattern, patternType):
+        self.detectionType = detectionType
+        self.name = name
+        self.context = context.replace("\n", "")
+        self.pattern = pattern
+        self.patternType = patternType
+
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+# api and token patterns are inspired by https://github.com/trufflesecurity/truffleHog
 patterns = {
     "Keys" : {
         "RSA private key": "-----BEGIN RSA PRIVATE KEY-----",
@@ -18,7 +33,7 @@ patterns = {
         "SSH (DSA) private key": "-----BEGIN DSA PRIVATE KEY-----",
         "SSH (EC) private key": "-----BEGIN EC PRIVATE KEY-----",
         "PGP private key block": "-----BEGIN PGP PRIVATE KEY BLOCK-----",
-        "Generic private key": "-{5}BEGIN.*PRIVATE KEY.*-{5}",
+        "Generic private key": "-{2,7}BEGIN.{0,15}PRIVATE KEY.{0,15}-{2,7}",
     },
     "APIKeys": {
         "AWS API Key": "(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}",
@@ -40,9 +55,11 @@ patterns = {
         "Google (GCP) Service-account": "\"type\": \"service_account\"",
     },
     "ApplicationSpecific":{
-        "FileZilla Export": '<Pass encoding="base64">',
-        "Putty Keyfile": "^PuTTY-User-Key-File-\\d:",
-        "Chrome Password Export": "^name,url,username,password\n",
+        "FileZilla Export": '<Pass encoding="base64">|<FileZilla\d version=\"',
+        "Putty Keyfile": "^PuTTY-User-Key-File-\d:",
+        "Chrome/Edge Password Export": "^name,url,username,password\n",
+        "WinSCP Export": "RandomSeedFile=.*winscp.rnd\n",
+        "Ultra VNC": "\[ultravnc\]\npasswd=.+",
     },
     "DirectoryName":{
         "Password": "password",
@@ -56,10 +73,12 @@ patterns = {
         "Passwort": "passwort",
         "Passwört": "passwört",
         "Chrome Password Export": "Chrome-Passwörter.csv|Chrome-Passwords.csv",
+        "Edge Password Export": "Microsoft Edge-Kennwörter.csv|Microsoft Edge-Passwords.csv",
         "Filezilla Export": "Filezilla.xml",
         "etc_passwd": "etc_passwd",
         "etc_shadow": "etc_shadow",
         ".htpasswd": ".htpasswd",
+        "WinSCP Export": "WinSCP.ini",
     }
 }
 
@@ -78,7 +97,8 @@ def get_dirs(directory):
     subdirs = [x[0] for x in os.walk(directory)]
     return subdirs
 
-def check_files(files, patterns, threadname):
+def check_files(files, patterns, threadname, extensionsToIgnore):
+    results = []
     totalFileCount = len(files)
     fileCount = 0
     for file in files:
@@ -86,54 +106,135 @@ def check_files(files, patterns, threadname):
 
         # print progress every 100 files
         if fileCount % 100 == 0:
-            print(f"{consoleColors.GREEN}[Thread {threadname}]{consoleColors.DEFAULT} {fileCount}/{totalFileCount} files checked ({round(fileCount/totalFileCount*100, 2)} %)" )
+            print(f"{ConsoleColors.GREEN}[Thread {threadname}]{ConsoleColors.DEFAULT} {fileCount}/{totalFileCount} files checked ({round(fileCount/totalFileCount*100, 2)} %)" )
 
         # check file name for patterns
-        for pattern in patterns["FileName"]:
-            filename = os.path.basename(file)
+        filename = os.path.basename(file)
+
+        # check if file ends with an extension to ignore
+        if any(filename.endswith(extension) for extension in extensionsToIgnore): continue
+
+        for pattern in patterns[DetectionType.FILENAME]:
             if re.search(pattern, filename):
-                print("{}[Filename]{} detected {}".format(consoleColors.RED, consoleColors.DEFAULT, file))
+                # create new search result and add it to results
+                result = SearchResult(DetectionType.FILENAME, file, "", "", "")
+                results.append(result)
 
         # check file content for patterns
-        # avoid errors with encoding
-        for line in open(file, errors='ignore'):
-            # iterate over all pattern types
-            for pattern_type in patterns:
-                # iterate over all patterns in a pattern type
-                for pattern in patterns[pattern_type]:
-                    # exclude directory patterns and file name patterns
-                    if pattern_type != "DirectoryName" and pattern_type != "FileName":
+        try :
+            for line in open(file, errors='ignore'):
+                # iterate over all pattern types
+                for pattern_type in patterns:
+                    # iterate over all patterns in a pattern type
+                    for pattern in patterns[pattern_type]:
+                        # exclude directory patterns and file name patterns
+                        if pattern_type == DetectionType.DIRECTORY or pattern_type == DetectionType.FILENAME: continue
                         regexResult = re.search(patterns[pattern_type][pattern], line)
-                        if regexResult:
-                            # get context n characters before and n characters after the match
-                            context = ""
-                            contextLenght = 20
-                            contextBegin = regexResult.start() - contextLenght > 0 and regexResult.start() - contextLenght or 0
-                            contextEnd = regexResult.end() + contextLenght < len(line) and regexResult.end() + contextLenght or len(line)
-                            context = line[contextBegin:contextEnd]
-                            # remove all whitespaces at the beginning
-                            context = context.lstrip()
+                        if not regexResult: continue
 
-                            print(f"{consoleColors.RED}[Filecontent]{consoleColors.ORANGE} <{pattern_type}>{consoleColors.DEFAULT} detected {pattern} in {file}")
-                            print("Context: {}".format(context == "" and "None" or context))
+                        # get context n characters before and n characters after the match
+                        context = ""
+                        contextLenght = 20
+                        contextBegin = regexResult.start() - contextLenght > 0 and regexResult.start() - contextLenght or 0
+                        contextEnd = regexResult.end() + contextLenght < len(line) and regexResult.end() + contextLenght or len(line)
+                        context = line[contextBegin:contextEnd]
+                        # remove all whitespaces at the beginning
+                        context = context.lstrip()
+
+                        # create new search result and add it to results
+                        result = SearchResult(DetectionType.FILECONTENT, file, context, pattern, pattern_type)
+                        results.append(result)
+        except:
+            print(f"{ConsoleColors.ORANGE}[Warning]{ConsoleColors.DEFAULT} Error while reading file {file}")
+            pass
     print(f"Thread {threadname} finished")
-    
+    return results
+
 def check_dir(directory, patterns):
+    results = []
     # check directory name for patterns
-    for pattern in patterns["DirectoryName"]:
+    for pattern in patterns[DetectionType.DIRECTORY]:
         if re.search(pattern, directory):
-            print(f"{consoleColors.RED}[Directoryname]{consoleColors.DEFAULT} detected {directory}")
+            # create new search result and add it to results
+            result = SearchResult(DetectionType.DIRECTORY, directory, "", "", "")
+            results.append(result)
+    return results
+
+def extract_list_args(arguments):
+    args = []
+    for arg in arguments:
+        argAppend = ""
+        for char in arg:
+            argAppend += char
+        args.append(argAppend)
+    return args
+
+def validate_ignore_extensions(list):
+    # if extension does not start with a dot add it
+    for i in range(len(list)):
+        if not list[i].startswith("."):
+            list[i] = "." + list[i]
+    return list
+
+def print_results(results):
+    print(f"\n{ConsoleColors.GREEN}-==============[Results]==============-{ConsoleColors.DEFAULT}\n")
+    # get all detection types
+    detectionTypes = []
+    for result in results:
+        if result.detectionType not in detectionTypes:
+            detectionTypes.append(result.detectionType)
+
+    # iterate over all detection types
+    for detectionType in detectionTypes:
+        # get all results for this detection type
+        resultsForType = [result for result in results 
+            if result.detectionType == detectionType
+        ]
+
+        # print results for this detection type
+        if detectionType == DetectionType.DIRECTORY:
+            print(f"{ConsoleColors.RED}┌───[Directoryname]{ConsoleColors.DEFAULT}")
+            for result in resultsForType:
+                decoration = result == resultsForType[-1] and "└─" or "├─"
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT} {result.name}")
+            print("\n")
+        elif detectionType == DetectionType.FILENAME:
+            print(f"{ConsoleColors.RED}┌───[Filename]{ConsoleColors.DEFAULT}")
+            for result in resultsForType:
+                decoration = result == resultsForType[-1] and "└─" or "├─"
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT} {result.name}")
+            print("\n")
+        elif detectionType == DetectionType.FILECONTENT:
+            print(f"{ConsoleColors.RED}┌───[Filecontent]{ConsoleColors.DEFAULT}")
+            print(f"{ConsoleColors.RED}│{ConsoleColors.DEFAULT}")
+            for result in resultsForType:
+                decorationTop = result == resultsForType[-1] and "└──" or "├──"
+                decoration = result == resultsForType[-1] and " " or "│"
+                print(f"{ConsoleColors.RED}{decorationTop}───[{result.patternType}]{ConsoleColors.DEFAULT}")
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT}      Pattern: {result.pattern}")
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT}      File:    {result.name}")
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT}      Context: {result.context == '' and 'None' or result.context}")
+                print(f"{ConsoleColors.RED}{decoration}{ConsoleColors.DEFAULT}")
+    totalResults = len(results)
+    print(f"\nTotal results: {totalResults}")
 
 def main():
+    output = []
+
     # parse arguments
     parser = argparse.ArgumentParser(description='Search for passwords and credentials in a directory structure')
 
     parser.add_argument('-d', '--directory', help='directory to search', required=False, default=os.getcwd())
-
-    # add number of threads
     parser.add_argument('-t', '--threads', help='number of threads to use', required=False, default=1)
+    parser.add_argument('-i', '--ignore', type=list, nargs='*', help='extensions to ignore', required=False, default=[])
 
     args = parser.parse_args()
+
+    # extract all extensions to ignore
+    ignoreExtensions = extract_list_args(args.ignore)
+
+    # add dot to all extensions if not already done
+    ignoreExtensions = validate_ignore_extensions(ignoreExtensions)
 
     # compile patterns
     compiled_patterns = {}
@@ -143,13 +244,15 @@ def main():
             # precompile pattern for faster search
             compiled_patterns[key][pattern] = re.compile(patterns[key][pattern])
 
-        # get subdirectories
+    # get subdirectories
     dirs = get_dirs(args.directory)
     print("Found {} subdirectories in directory {}".format(len(dirs), args.directory))
 
+    print("Start scanning directories")
     # check subdirectories
     for dir in dirs:
-        check_dir(dir, compiled_patterns)
+        res = check_dir(dir, compiled_patterns)
+        output.extend(res)
 
     # get files in directory
     dir_files = get_dir_files(args.directory)
@@ -167,16 +270,16 @@ def main():
 
     # create threads
     threads = []
+    result = []
+    pool = ThreadPool(processes=int(args.threads))
     for i in range(0, int(args.threads)):
-        t = threading.Thread(target=check_files, args=(files[i], compiled_patterns, i + 1))
-        threads.append(t)
+        result = pool.apply_async(check_files, (files[i], compiled_patterns, i + 1, ignoreExtensions))
+        print("Started thread {}".format(i + 1))
+        # get output from thread and add it to output
+        threadOutput = result.get()
+        output.extend(threadOutput)
 
-    # start threads
-    threadCount = 0
-    for thread in threads:
-        threadCount += 1
-        thread.start()
-        print("Started thread {}".format(threadCount))
+    print_results(output)
 
 if __name__ == '__main__':
     main()
