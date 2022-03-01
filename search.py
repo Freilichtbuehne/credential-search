@@ -1,29 +1,8 @@
 import os
 import argparse
 import re
-from multiprocessing.pool import ThreadPool
-
-class ConsoleColors:
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    ORANGE = "\033[93m"
-    DEFAULT = "\033[0m"
-
-class DetectionType:
-    FILENAME = "FileName"
-    FILECONTENT = "FileContent"
-    DIRECTORY = "DirectoryName"
-
-class SearchResult:
-    def __init__(self, detectionType, name, context, pattern, patternType):
-        self.detectionType = detectionType
-        self.name = name
-        self.context = context.replace("\n", "")
-        self.pattern = pattern
-        self.patternType = patternType
-
-    def __getattribute__(self, name):
-        return object.__getattribute__(self, name)
+from threading import Thread
+import time
 
 # api and token patterns are inspired by https://github.com/trufflesecurity/truffleHog
 patterns = {
@@ -81,6 +60,43 @@ patterns = {
         "WinSCP Export": "WinSCP.ini",
     }
 }
+
+class ConsoleColors:
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    ORANGE = "\033[93m"
+    BLUE = "\033[94m"
+    DEFAULT = "\033[0m"
+
+class DetectionType:
+    FILENAME = "FileName"
+    FILECONTENT = "FileContent"
+    DIRECTORY = "DirectoryName"
+
+# https://stackoverflow.com/questions/6893968/how-to-get-the-return-value-from-a-thread-in-python
+class ThreadWithReturnValue(Thread):
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, Verbose=None):
+        Thread.__init__(self, group, target, name, args, kwargs)
+        self._return = None
+    def run(self):
+        if self._target is not None:
+            self._return = self._target(*self._args,
+                                                **self._kwargs)
+    def join(self, *args):
+        Thread.join(self, *args)
+        return self._return
+
+class SearchResult:
+    def __init__(self, detectionType, name, context, pattern, patternType):
+        self.detectionType = detectionType
+        self.name = name
+        self.context = context.replace("\n", "")
+        self.pattern = pattern
+        self.patternType = patternType
+
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
 
 def get_dir_files(directory):
     dir_files = []
@@ -144,6 +160,7 @@ def check_files(files, patterns, threadname, extensionsToIgnore):
                         # create new search result and add it to results
                         result = SearchResult(DetectionType.FILECONTENT, file, context, pattern, pattern_type)
                         results.append(result)
+                        print(f"{ConsoleColors.RED}[Hit]{ConsoleColors.DEFAULT} Found credentials in {file}")
         except:
             print(f"{ConsoleColors.ORANGE}[Warning]{ConsoleColors.DEFAULT} Error while reading file {file}")
             pass
@@ -245,10 +262,11 @@ def main():
             compiled_patterns[key][pattern] = re.compile(patterns[key][pattern])
 
     # get subdirectories
+    print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Seaching subdirectories...")
     dirs = get_dirs(args.directory)
-    print("Found {} subdirectories in directory {}".format(len(dirs), args.directory))
+    print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Found {len(dirs)} subdirectories in directory {args.directory}")
 
-    print("Start scanning directories")
+    print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Start scanning directories")
     # check subdirectories
     for dir in dirs:
         res = check_dir(dir, compiled_patterns)
@@ -256,7 +274,7 @@ def main():
 
     # get files in directory
     dir_files = get_dir_files(args.directory)
-    print("Found {} files in directory {}".format(len(dir_files), args.directory))
+    print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Found {len(dir_files)} files in directory {args.directory}")
 
     # check files
     countTotal = len(dir_files)
@@ -268,16 +286,26 @@ def main():
     for i in range(0, int(args.threads)):
         files.append(dir_files[i*filesPerThread:(i+1)*filesPerThread])
 
-    # create threads
     threads = []
-    result = []
-    pool = ThreadPool(processes=int(args.threads))
+
     for i in range(0, int(args.threads)):
-        result = pool.apply_async(check_files, (files[i], compiled_patterns, i + 1, ignoreExtensions))
-        print("Started thread {}".format(i + 1))
-        # get output from thread and add it to output
-        threadOutput = result.get()
-        output.extend(threadOutput)
+        t = ThreadWithReturnValue(target=check_files, args=(files[i], compiled_patterns, i + 1, ignoreExtensions,))
+        t.daemon = True
+        threads.append(t)
+        t.start()
+        print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Started thread {i + 1}")
+
+    # start threads
+    while True:
+        time.sleep(1)
+        if len(threads) == 0:
+            break
+        for t in threads:
+            if not t.is_alive():
+                output.extend(t.join())
+                threads.remove(t)
+
+    print("Finished scanning files")
 
     print_results(output)
 
