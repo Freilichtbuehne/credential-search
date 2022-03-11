@@ -51,13 +51,13 @@ patterns = {
         "Credential": "credential",
         "Passwort": "passwort",
         "Passwört": "passwört",
-        "Chrome Password Export": "Chrome-Passwörter.csv|Chrome-Passwords.csv",
-        "Edge Password Export": "Microsoft Edge-Kennwörter.csv|Microsoft Edge-Passwords.csv",
-        "Filezilla Export": "Filezilla.xml",
+        "Chrome Password Export": "chrome[- ]pass(wörter|words)\.csv",
+        "Edge Password Export": "microsoft edge[- ](passwords|kennwörter)\.csv",
+        "Filezilla Export": "filezilla.{0,20}\.xml",
+        "WinSCP Export": "winscp.{0,20}\.ini",
         "etc_passwd": "etc_passwd",
         "etc_shadow": "etc_shadow",
-        ".htpasswd": ".htpasswd",
-        "WinSCP Export": "WinSCP.ini",
+        ".htpasswd": "\.htpasswd",
     }
 }
 
@@ -124,14 +124,14 @@ def check_files(files, patterns, threadname, extensionsToIgnore):
         if fileCount % 100 == 0:
             print(f"{ConsoleColors.GREEN}[Thread {threadname}]{ConsoleColors.DEFAULT} {fileCount}/{totalFileCount} files checked ({round(fileCount/totalFileCount*100, 2)} %)" )
 
-        # check file name for patterns
-        filename = os.path.basename(file)
+        # check file name for patterns and convert to lowercase
+        filename = os.path.basename(file).lower()
 
         # check if file ends with an extension to ignore
         if any(filename.endswith(extension) for extension in extensionsToIgnore): continue
 
         for pattern in patterns[DetectionType.FILENAME]:
-            if re.search(pattern, filename):
+            if re.search(patterns[DetectionType.FILENAME][pattern], filename):
                 # create new search result and add it to results
                 result = SearchResult(DetectionType.FILENAME, file, "", "", "")
                 results.append(result)
