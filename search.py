@@ -33,6 +33,7 @@ patterns = {
         "Slack Webhook": "https://hooks.slack.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}",
         "Google (GCP) Service-account": "\"type\": \"service_account\"",
     },
+    #TODO: Add some more applications
     "ApplicationSpecific":{
         "FileZilla Export": '<Pass encoding="base64">|<FileZilla\d version=\"',
         "Putty Keyfile": "^PuTTY-User-Key-File-\d:",
@@ -75,14 +76,12 @@ class DetectionType:
 
 # https://stackoverflow.com/questions/6893968/how-to-get-the-return-value-from-a-thread-in-python
 class ThreadWithReturnValue(Thread):
-    def __init__(self, group=None, target=None, name=None,
-                 args=(), kwargs={}, Verbose=None):
+    def __init__(self, group=None, target=None, name=None, args=(), kwargs={}, Verbose=None):
         Thread.__init__(self, group, target, name, args, kwargs)
         self._return = None
     def run(self):
         if self._target is not None:
-            self._return = self._target(*self._args,
-                                                **self._kwargs)
+            self._return = self._target(*self._args, **self._kwargs)
     def join(self, *args):
         Thread.join(self, *args)
         return self._return
@@ -194,7 +193,7 @@ def validate_ignore_extensions(list):
     return list
 
 def print_results(results):
-    print(f"\n{ConsoleColors.GREEN}-==============[Results]==============-{ConsoleColors.DEFAULT}\n")
+    print(f"\n{ConsoleColors.GREEN}-{"="*14}[Results]{"="*14}-{ConsoleColors.DEFAULT}\n")
     # get all detection types
     detectionTypes = []
     for result in results:
@@ -253,15 +252,14 @@ def main():
     # add dot to all extensions if not already done
     ignoreExtensions = validate_ignore_extensions(ignoreExtensions)
 
-    # compile patterns
+    # precompile regex pattern for faster search
     compiled_patterns = {}
     for key in patterns:
         compiled_patterns[key] = {}
         for pattern in patterns[key]:
-            # precompile pattern for faster search
             compiled_patterns[key][pattern] = re.compile(patterns[key][pattern])
 
-    # get subdirectories
+    # search subdirectories
     print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Seaching subdirectories...")
     dirs = get_dirs(args.directory)
     print(f"{ConsoleColors.BLUE}[Info]{ConsoleColors.DEFAULT} Found {len(dirs)} subdirectories in directory {args.directory}")
